@@ -1,0 +1,125 @@
+# Import libraries
+from flask import Flask, request, jsonify
+from flask_socketio import SocketIO, emit
+import requests
+import os
+from threading import Thread
+
+# Initialize Flask app and SocketIO
+app = Flask(__name__)
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+# Your API keys
+API_KEYS = [
+    "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",
+    "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",
+    "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",
+    "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",
+    "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",
+    "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",
+    "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",
+    "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",
+    "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",
+    "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",
+    "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",
+    "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",
+    "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",
+    "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",
+    "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",
+    "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",
+    "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",
+    "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"
+]
+
+# Store conversation state
+conversation_state = {"context": "", "permissions": {}, "mode": "default"}
+
+# Select API key dynamically (for now, rotate through them)
+current_key_index = 0
+def get_api_key():
+    global current_key_index
+    key = API_KEYS[current_key_index]
+    current_key_index = (current_key_index + 1) % len(API_KEYS)
+    return key
+
+# Call an API (example for OpenRouter-style endpoint)
+def call_api(api_key, user_input):
+    endpoint = "https://openrouter.ai/api/v1/chat/completions"  # Example endpoint
+    headers = {"Authorization": f"Bearer {api_key}"}
+    data = {
+        "model": "gpt-3.5-turbo",  # Example model; adjust based on API docs
+        "messages": [{"role": "user", "content": user_input}]
+    }
+    try:
+        response = requests.post(endpoint, json=data, headers=headers)
+        return response.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"Error with API: {str(e)}"
+
+# Think before responding
+def think_and_respond(user_input):
+    # Simple "thinking" logic: analyze input and decide action
+    if "upload" in user_input.lower() and "video" in user_input.lower():
+        return {"action": "upload_video", "needs_permission": "camera"}
+    elif "send" in user_input.lower() and "message" in user_input.lower():
+        return {"action": "send_message", "needs_permission": "contacts"}
+    elif "ya" in user_input.lower():
+        return {"action": "confirm_or_switch", "response": "Got it, what next?"}
+    else:
+        # Fallback to API for general queries
+        api_key = get_api_key()
+        return {"action": "respond", "response": call_api(api_key, user_input)}
+
+# Handle permissions
+def request_permission(permission):
+    if permission not in conversation_state["permissions"]:
+        conversation_state["permissions"][permission] = False
+        return False
+    return conversation_state["permissions"][permission]
+
+# Placeholder action functions
+def upload_video(user_input):
+    # Simulate video upload (integrate with social media API later)
+    return "Video uploaded successfully!"
+
+def send_message(user_input):
+    # Simulate sending a message (integrate with messaging API later)
+    return "Message sent!"
+
+# WebSocket event for messages
+@socketio.on('message')
+def handle_message(message):
+    user_input = message['data']
+    conversation_state["context"] += f"User: {user_input}\n"
+    
+    # Think and decide
+    decision = think_and_respond(user_input)
+    
+    if "needs_permission" in decision and not request_permission(decision["needs_permission"]):
+        emit('permission_request', {'permission': decision["needs_permission"], 'message': f"Need {decision['needs_permission']} access. Allow?"})
+        return
+    
+    if decision["action"] == "upload_video":
+        result = upload_video(user_input)
+    elif decision["action"] == "send_message":
+        result = send_message(user_input)
+    elif decision["action"] == "confirm_or_switch":
+        result = decision["response"]
+        conversation_state["mode"] = "awaiting_next"  # Switch mode example
+    else:
+        result = decision["response"]
+    
+    conversation_state["context"] += f"Assistant: {result}\n"
+    emit('response', {'data': result})
+
+# Permission grant event
+@socketio.on('grant_permission')
+def handle_permission(permission_data):
+    permission = permission_data['permission']
+    granted = permission_data['granted']
+    conversation_state["permissions"][permission] = granted
+    emit('response', {'data': f"Permission for {permission} {'granted' if granted else 'denied'}."})
+
+# Run the app
+if __name__ == '__main__':
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
